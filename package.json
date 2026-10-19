@@ -1,0 +1,13 @@
+{
+  "name": "chatapp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minimal self-hosted text chat UI for OpenAI-compatible APIs",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "dompurify": "^3.2.0",
+    "marked": "^15.0.0",
+    "pg": "^8.13.0"
+  }
+}

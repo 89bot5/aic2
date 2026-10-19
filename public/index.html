@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="base" content="{{BASE}}">
+  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+  <title>Chat</title>
+  <link rel="icon" href="{{BASE}}/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="{{BASE}}/static/style.css">
+</head>
+<body>
+  <button class="icon-btn sidebar-toggle" id="sidebarToggle" type="button" aria-label="Toggle chat list" title="Toggle chat list">
+    <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="2" /><path d="M8 4v12" /></svg>
+  </button>
+  <div class="app" id="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-top">
+        <button class="new-chat" id="newChat" type="button">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12" /></svg>
+          New chat
+        </button>
+      </div>
+      <nav class="chat-list" id="chatList" aria-label="Chats"></nav>
+      <form class="sidebar-bottom" method="post" action="{{BASE}}/logout">
+        <button type="submit" class="logout">Log out</button>
+      </form>
+      <div class="resizer" id="resizer" aria-hidden="true"></div>
+    </aside>
+    <div class="scrim" id="scrim"></div>
+
+    <main class="main">
+      <header class="topbar">
+        <h1 class="chat-title" id="chatTitle"></h1>
+      </header>
+
+      <section class="thread" id="thread">
+        <div class="thread-inner">
+          <div class="sys-prompt" id="sysPrompt" hidden>
+            <div class="sys-label">System prompt</div>
+            <div class="sys-text" id="sysText"></div>
+            <button class="sys-more" id="sysMore" type="button" hidden>Show more</button>
+          </div>
+          <div id="messages"></div>
+        </div>
+        <div class="empty" id="empty">
+          <h2>What's on your mind?</h2>
+        </div>
+      </section>
+
+      <footer class="composer-wrap">
+        <form class="composer" id="composer">
+          <textarea id="input" rows="1" placeholder="Message…" autocomplete="off"></textarea>
+          <button class="send" id="send" type="submit" aria-label="Send">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 16V4M5 9l5-5 5 5" /></svg>
+          </button>
+          <button class="stop" id="stop" type="button" aria-label="Stop" hidden>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5.5" y="5.5" width="9" height="9" rx="1.5" /></svg>
+          </button>
+        </form>
+        <p class="hint">Enter to send · Shift+Enter for a new line</p>
+      </footer>
+    </main>
+  </div>
+
+  <dialog class="modal" id="promptDialog">
+    <form method="dialog" id="promptForm">
+      <h2>System prompt</h2>
+      <p class="modal-sub" id="promptChatName"></p>
+      <textarea id="promptInput" rows="10" placeholder="e.g. You are a concise assistant who answers in plain English."></textarea>
+      <div class="modal-actions">
+        <button type="button" class="btn-ghost" id="promptClear">Clear</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn-ghost" id="promptCancel">Cancel</button>
+        <button type="submit" class="btn-primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="{{BASE}}/vendor/marked.js"></script>
+  <script src="{{BASE}}/vendor/purify.js"></script>
+  <script src="{{BASE}}/static/app.js"></script>
+</body>
+</html>

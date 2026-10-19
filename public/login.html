@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in</title>
+  <link rel="icon" href="{{BASE}}/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="{{BASE}}/static/style.css">
+</head>
+<body class="login-body">
+  <form class="login-card" method="post" action="{{BASE}}/login">
+    <img src="{{BASE}}/static/icon.svg" alt="" class="login-icon">
+    <h1>Sign in</h1>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+    <button type="submit">Continue</button>
+    {{ERROR}}
+  </form>
+</body>
+</html>

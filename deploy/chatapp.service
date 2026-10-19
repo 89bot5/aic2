@@ -1,0 +1,24 @@
+[Unit]
+Description=Chat app
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+# APP_DIR is replaced with the app's folder during setup (see README).
+User=chatapp
+Group=chatapp
+WorkingDirectory=APP_DIR
+EnvironmentFile=/etc/chatapp.env
+ExecStart=/usr/bin/node APP_DIR/server.js
+Restart=on-failure
+RestartSec=3
+
+# Hardening: the app only needs to read its own files and talk to the network.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+
+[Install]
+WantedBy=multi-user.target
