@@ -16,11 +16,14 @@ A small, private, text-only chat app for [abliteration.ai](https://abliteration.
 ## Run it on your computer
 
 1. Install [Node.js](https://nodejs.org) 20 or newer (the LTS version is fine).
-2. Download this project (green **Code** button → **Download ZIP**, then unzip), or:
+2. Get the project. Either download it (green **Code** button → **Download ZIP**, unzip it,
+   and open a terminal in the unzipped folder), or in a terminal run:
    ```bash
    git clone https://github.com/89bot5/aic2.git
+   cd aic2
    ```
-3. In a terminal, inside the project folder:
+   `git clone` makes a new `aic2` folder wherever you run it, so the `cd aic2` matters.
+3. Install and start:
    ```bash
    npm install
    npm start
