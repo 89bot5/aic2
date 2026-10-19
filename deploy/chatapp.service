@@ -1,6 +1,6 @@
 [Unit]
-Description=Chat app
-After=network-online.target postgresql.service
+Description=aic2 chat
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -8,12 +8,19 @@ Wants=network-online.target
 User=chatapp
 Group=chatapp
 WorkingDirectory=APP_DIR
-EnvironmentFile=/etc/chatapp.env
 ExecStart=/usr/bin/node APP_DIR/server.js
 Restart=on-failure
 RestartSec=3
 
-# Hardening: the app only needs to read its own files and talk to the network.
+# Chats, the password and the API key live here (created automatically, owned by chatapp).
+StateDirectory=aic2
+Environment=DATA_DIR=/var/lib/aic2
+Environment=HOST=127.0.0.1
+Environment=PORT=3000
+# Uncomment to serve under a subpath such as https://example.com/aic/
+#Environment=BASE_PATH=/aic
+
+# Hardening: the app only needs to read its own files, write its data folder and use the network.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only

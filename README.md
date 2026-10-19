@@ -1,90 +1,115 @@
-# ai-chat-interface
+# aic2
 
-A small self-hosted, text-only chat UI for any OpenAI-compatible API (built for abliteration.ai).
+A small, private, text-only chat app for [abliteration.ai](https://abliteration.ai)
+(or any OpenAI-compatible API). Runs on your own computer or server.
 
-- Password login, with a 15-minute lockout after 5 wrong attempts per IP
-- Separate chats in a resizable, collapsible sidebar, with rename and delete, stored in Postgres
-- A per-chat system prompt (cog icon) and reasoning effort (gauge icon: Default, Low, High, Max) on each chat row
-- Streaming replies, Stop, Retry, Copy, delete any single message, and a collapsible "Thinking" section for reasoning models
-- Markdown rendering, dark mode, and a mobile layout
-- Node.js with three dependencies (`pg`, `marked`, `dompurify`), no build step, no telemetry,
-  and no third-party requests from the browser
+- Chats in a sidebar, with rename, delete, a per-chat system prompt (gear icon)
+  and reasoning level (gauge icon)
+- Streaming replies with Stop, Retry, Copy and per-message delete
+- Markdown, dark mode, mobile layout
+- Everything is stored in one SQLite file. No database server, no telemetry,
+  and the page never contacts any site except your own server.
 
-## Layout
+**Text only.** Images and file attachments aren't supported.
+**Reasoning levels** (Low / High / Max) only work with GLM 5.3; leave them on Default for other models.
 
-| Path | What it is |
-|---|---|
-| `server.js` | HTTP server: login, chat storage, streaming from the model API |
-| `public/` | The page (HTML, CSS, JS) |
-| `deploy/chatapp.env.example` | Config template (copy to `/etc/chatapp.env`) |
-| `deploy/chatapp.service` | systemd unit |
+## Run it on your computer
 
-All configuration is through environment variables. The database tables are created on first start.
+1. Install [Node.js](https://nodejs.org) 20 or newer (the LTS version is fine).
+2. Download this project (green **Code** button → **Download ZIP**, then unzip), or:
+   ```bash
+   git clone https://github.com/89bot5/aic2.git
+   ```
+3. In a terminal, inside the project folder:
+   ```bash
+   npm install
+   npm start
+   ```
+4. Open <http://localhost:3000>.
+   - The first time, it asks you to **create a password**.
+   - Then it asks for your **API key**. You can change it any time with the key icon
+     at the bottom left, next to *Log out*.
 
-## Install (Debian)
+Leave the terminal open while you use it. Press `Ctrl+C` to stop.
 
-`APP_DIR` below is wherever you cloned this repo, e.g. `/var/www/html/aic`.
+### Good to know
+
+- Your chats, password (hashed) and API key are stored in the `data` folder inside the project.
+  Back it up if you care about your chats; delete it to start completely fresh.
+- Forgot your password? Stop the app, run `npm run reset-password`, start it again,
+  and the page will ask you to create a new one. Your chats are kept.
+- Port 3000 taken? Use another: `PORT=3001 npm start`
+  (Windows PowerShell: `$env:PORT=3001; npm start`).
+- To update: download the new version (or `git pull`), then `npm install` and start again.
+  Your `data` folder carries over.
+
+## Optional settings
+
+All optional, set as environment variables:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `PORT` | `3000` | Port to listen on |
+| `HOST` | `127.0.0.1` | Address to listen on. The default only accepts connections from this computer |
+| `DATA_DIR` | `./data` | Where the database is stored |
+| `API_BASE_URL` | `https://api.abliteration.ai/v1` | Any OpenAI-compatible endpoint |
+| `MODEL` | `abliterated-model-large-v2` | Default model (can also be changed in the key dialog) |
+| `BASE_PATH` | *(empty)* | Serve under a subpath, e.g. `/aic` |
+
+## Run it on a server (Debian/Ubuntu)
+
+**Important:** until a password is created, whoever opens the page first gets to set it.
+Do the first visit yourself right after starting the service.
 
 ```bash
 sudo apt install -y nodejs npm
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin chatapp
-cd APP_DIR && npm ci --omit=dev
-
-sudo -u postgres psql -c "CREATE USER chatapp WITH PASSWORD 'db-password';" -c "CREATE DATABASE chatapp OWNER chatapp;"
-
-sudo cp deploy/chatapp.env.example /etc/chatapp.env
-sudo chmod 600 /etc/chatapp.env
-sudo nano /etc/chatapp.env        # fill in the values
-
-sed "s#APP_DIR#$(pwd)#g" deploy/chatapp.service | sudo tee /etc/systemd/system/chatapp.service >/dev/null
+git clone https://github.com/89bot5/aic2.git /opt/aic2
+cd /opt/aic2 && sudo npm ci --omit=dev
+sed "s#APP_DIR#$(pwd)#g" deploy/chatapp.service | sudo tee /etc/systemd/system/aic2.service >/dev/null
 sudo systemctl daemon-reload
-sudo systemctl enable --now chatapp
+sudo systemctl enable --now aic2
 ```
 
-## nginx
+Data lives in `/var/lib/aic2`. To reset the password on a server:
+```bash
+sudo systemctl stop aic2
+sudo -u chatapp env DATA_DIR=/var/lib/aic2 node /opt/aic2/server.js --reset-password
+sudo systemctl start aic2
+```
 
+### Reverse proxy
+
+The app speaks plain HTTP on `127.0.0.1:3000`; put it behind your HTTPS web server.
+Pass the real client IP (used for the login lockout) and the scheme (so the login cookie is marked secure).
+
+nginx:
 ```nginx
-location /aic/ {
+location / {
     proxy_pass http://127.0.0.1:3000;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
     proxy_buffering off;
     proxy_read_timeout 300s;
 }
 ```
 
-`X-Forwarded-For $remote_addr` matters: the login lockout uses it to tell visitors apart.
-`proxy_pass` has no trailing path on purpose; the app strips `BASE_PATH` itself.
-To serve at the site root instead, use `location /` and leave `BASE_PATH` empty.
-
-## Apache (instead of nginx)
-
-```bash
-sudo a2enmod proxy proxy_http headers
-```
-
-Inside the site's `<VirtualHost *:443>` block:
-
+Apache (`sudo a2enmod proxy proxy_http headers`), inside the `<VirtualHost *:443>` block:
 ```apache
-RedirectMatch 301 ^/aic$ /aic/
 ProxyAddHeaders Off
 RequestHeader set X-Forwarded-For "expr=%{REMOTE_ADDR}"
-SetEnvIf Request_URI "^/aic/api/" no-gzip=1
-ProxyPass        /aic/ http://127.0.0.1:3000/aic/ flushpackets=on timeout=300
-ProxyPassReverse /aic/ http://127.0.0.1:3000/aic/
+RequestHeader set X-Forwarded-Proto "https"
+SetEnvIf Request_URI "/api/" no-gzip=1
+ProxyPass        / http://127.0.0.1:3000/ flushpackets=on timeout=300
+ProxyPassReverse / http://127.0.0.1:3000/
 ```
 
-Then `sudo apache2ctl configtest && sudo systemctl reload apache2`.
-`ProxyAddHeaders Off` plus the `RequestHeader` line ensure `X-Forwarded-For` holds only the real
-client IP, so the login lockout can't be dodged with a forged header.
+For a subpath such as `/aic/`, set `BASE_PATH=/aic` in the service file and use
+`location /aic/` (nginx) or `ProxyPass /aic/ http://127.0.0.1:3000/aic/` (Apache).
 
-## Updating
+### Updating
 
 ```bash
-cd APP_DIR && git pull && npm ci --omit=dev && sudo systemctl restart chatapp
+cd /opt/aic2 && sudo git pull && sudo npm ci --omit=dev && sudo systemctl restart aic2
 ```
-
-## Notes
-
-- Changing `APP_PASSWORD` or `SESSION_SECRET` and restarting logs out every session.
-- On touch devices, Enter inserts a new line; tap the arrow to send.

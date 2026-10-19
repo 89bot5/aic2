@@ -7,6 +7,8 @@ const els = {
   sysPrompt: $('sysPrompt'), sysText: $('sysText'), sysMore: $('sysMore'),
   dialog: $('promptDialog'), promptForm: $('promptForm'), promptInput: $('promptInput'), promptName: $('promptChatName'),
   promptClear: $('promptClear'), promptCancel: $('promptCancel'),
+  keyBtn: $('keyBtn'), keyDialog: $('keyDialog'), keyForm: $('keyForm'), keyStatus: $('keyStatus'),
+  keyInput: $('keyInput'), modelInput: $('modelInput'), keyRemove: $('keyRemove'), keyCancel: $('keyCancel'),
   chatList: $('chatList'), title: $('chatTitle'), thread: $('thread'), messages: $('messages'),
   empty: $('empty'), composer: $('composer'), input: $('input'), send: $('send'), stop: $('stop'),
 };
@@ -537,6 +539,48 @@ els.promptClear.addEventListener('click', () => { els.promptInput.value = ''; el
 els.promptCancel.addEventListener('click', () => els.dialog.close());
 els.dialog.addEventListener('close', () => { promptChat = null; });
 
+// ---------- API key settings ----------
+let settings = null;
+function showKeyState() {
+  const missing = !settings?.has_key;
+  els.keyBtn.classList.toggle('missing', missing);
+  els.keyBtn.title = missing ? 'API key: not set' : 'API key';
+}
+async function loadSettings() {
+  try { settings = await api('/api/settings'); } catch { return; }
+  showKeyState();
+}
+async function openKeyDialog() {
+  await loadSettings();
+  if (!settings) return;
+  els.keyStatus.textContent = settings.has_key ? `A key ending in …${settings.key_hint} is saved.` : 'No key saved yet. Add one to start chatting.';
+  els.keyInput.value = '';
+  els.keyInput.placeholder = settings.has_key ? 'Paste a new key to replace it' : 'Paste your key';
+  els.modelInput.value = settings.model;
+  els.modelInput.placeholder = settings.default_model;
+  els.keyRemove.hidden = !settings.has_key;
+  els.keyDialog.showModal();
+  els.keyInput.focus();
+}
+async function saveSettings(body) {
+  try { await api('/api/settings', { method: 'PUT', body }); }
+  catch (e) { alert(e.message); return false; }
+  await loadSettings();
+  return true;
+}
+els.keyBtn.addEventListener('click', openKeyDialog);
+els.keyForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const body = { model: els.modelInput.value };
+  if (els.keyInput.value.trim()) body.api_key = els.keyInput.value;
+  if (await saveSettings(body)) els.keyDialog.close();
+});
+els.keyRemove.addEventListener('click', async () => {
+  if (!confirm('Remove the saved API key?')) return;
+  if (await saveSettings({ api_key: '' })) els.keyDialog.close();
+});
+els.keyCancel.addEventListener('click', () => els.keyDialog.close());
+
 // ---------- reasoning effort menu ----------
 let effortMenu = null;
 function closeEffortMenu() {
@@ -674,4 +718,6 @@ function route() {
 }
 
 loadChats().then(route).catch((e) => console.error(e));
+// First visit after setup: ask for the API key straight away.
+loadSettings().then(() => { if (settings && !settings.has_key) openKeyDialog(); });
 updateSendEnabled();

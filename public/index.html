@@ -21,9 +21,14 @@
         </button>
       </div>
       <nav class="chat-list" id="chatList" aria-label="Chats"></nav>
-      <form class="sidebar-bottom" method="post" action="{{BASE}}/logout">
-        <button type="submit" class="logout">Log out</button>
-      </form>
+      <div class="sidebar-bottom">
+        <form method="post" action="{{BASE}}/logout" class="logout-form">
+          <button type="submit" class="logout">Log out</button>
+        </form>
+        <button class="icon-btn key-btn" id="keyBtn" type="button" aria-label="API key" title="API key">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="7" cy="12.5" r="3.5" /><path d="M9.5 10l6.5-6.5M13.5 6l2 2M11.5 8l1.5 1.5" /></svg>
+        </button>
+      </div>
       <div class="resizer" id="resizer" aria-hidden="true"></div>
     </aside>
     <div class="scrim" id="scrim"></div>
@@ -71,6 +76,28 @@
         <button type="button" class="btn-ghost" id="promptClear">Clear</button>
         <span class="spacer"></span>
         <button type="button" class="btn-ghost" id="promptCancel">Cancel</button>
+        <button type="submit" class="btn-primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="modal" id="keyDialog">
+    <form method="dialog" id="keyForm">
+      <h2>API key</h2>
+      <p class="modal-sub" id="keyStatus"></p>
+      <label class="field-label" for="keyInput">Abliteration API key</label>
+      <input class="field" id="keyInput" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your key">
+      <p class="field-hint">Saved on this server only and never shown again. Leave blank to keep the current key.</p>
+      <label class="field-label" for="modelInput">Model</label>
+      <input class="field" id="modelInput" type="text" autocomplete="off" spellcheck="false">
+      <div class="notice">
+        <p><strong>Text only.</strong> Images, files and other attachments aren't supported.</p>
+        <p><strong>Reasoning levels</strong> (the gauge on each chat) only work with GLM 5.3. Other models may ignore them or return an error, so leave them on Default.</p>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn-ghost danger" id="keyRemove">Remove key</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn-ghost" id="keyCancel">Cancel</button>
         <button type="submit" class="btn-primary">Save</button>
       </div>
     </form>

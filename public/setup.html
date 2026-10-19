@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Set up</title>
+  <link rel="icon" href="{{BASE}}/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="{{BASE}}/static/style.css">
+</head>
+<body class="login-body">
+  <form class="login-card" method="post" action="{{BASE}}/setup">
+    <img src="{{BASE}}/static/icon.svg" alt="" class="login-icon">
+    <h1>Create a password</h1>
+    <p class="login-sub">This protects your chats. You'll use it to sign in from now on.</p>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="new-password" minlength="{{MIN_PASSWORD}}" required autofocus>
+    <label for="confirm" class="second">Confirm password</label>
+    <input id="confirm" name="confirm" type="password" autocomplete="new-password" minlength="{{MIN_PASSWORD}}" required>
+    <button type="submit">Create password</button>
+    {{ERROR}}
+  </form>
+</body>
+</html>

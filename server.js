@@ -1,64 +1,95 @@
 'use strict';
 // Minimal self-hosted text chat for any OpenAI-compatible API.
-// One process, one Postgres database, one password.
+// One process, one SQLite file, one password. No configuration needed to start:
+// the first visit asks you to create a password, and the API key is set in the app.
 
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { Pool } = require('pg');
+const Database = require('better-sqlite3');
 
-// ---------- config ----------
+// ---------- config (all optional) ----------
 const cfg = {
   host: process.env.HOST || '127.0.0.1',
   port: Number(process.env.PORT || 3000),
-  password: process.env.APP_PASSWORD,
-  secret: process.env.SESSION_SECRET,
+  dataDir: path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data')),
   apiBase: (process.env.API_BASE_URL || 'https://api.abliteration.ai/v1').replace(/\/+$/, ''),
-  apiKey: process.env.API_KEY,
-  model: process.env.MODEL || 'abliterated-model',
-  systemPrompt: process.env.SYSTEM_PROMPT || '',
+  defaultModel: process.env.MODEL || 'abliterated-model-large-v2',
   // URL prefix when served under a subpath, e.g. /aic. Empty means the site root.
   base: (process.env.BASE_PATH || '').replace(/\/+$/, '').replace(/^(?=[^/])/, '/'),
-  // Set INSECURE_COOKIE=1 only for local testing over plain http.
-  secureCookie: process.env.INSECURE_COOKIE !== '1',
 };
-for (const [key, env] of [['password', 'APP_PASSWORD'], ['secret', 'SESSION_SECRET'], ['apiKey', 'API_KEY']]) {
-  if (!cfg[key]) { console.error(`Missing required environment variable ${env}`); process.exit(1); }
-}
-if (!process.env.DATABASE_URL) { console.error('Missing required environment variable DATABASE_URL'); process.exit(1); }
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+// ---------- database ----------
+fs.mkdirSync(cfg.dataDir, { recursive: true, mode: 0o700 });
+const db = new Database(path.join(cfg.dataDir, 'chat.db'));
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
 
-async function initDb() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS chats (
-      id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      title      text NOT NULL DEFAULT 'New chat',
-      created_at timestamptz NOT NULL DEFAULT now(),
-      updated_at timestamptz NOT NULL DEFAULT now()
-    );
-    CREATE TABLE IF NOT EXISTS messages (
-      id         bigserial PRIMARY KEY,
-      chat_id    uuid NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-      role       text NOT NULL CHECK (role IN ('user', 'assistant')),
-      content    text NOT NULL,
-      reasoning  text,
-      created_at timestamptz NOT NULL DEFAULT now()
-    );
-    CREATE INDEX IF NOT EXISTS messages_chat_idx ON messages (chat_id, id);
-    ALTER TABLE chats ADD COLUMN IF NOT EXISTS system_prompt text;
-    ALTER TABLE chats ADD COLUMN IF NOT EXISTS reasoning_effort text;
-  `);
+const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
+db.exec(`
+  CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS chats (
+    id               TEXT PRIMARY KEY,
+    title            TEXT NOT NULL DEFAULT 'New chat',
+    system_prompt    TEXT,
+    reasoning_effort TEXT,
+    created_at       TEXT NOT NULL DEFAULT (${NOW}),
+    updated_at       TEXT NOT NULL DEFAULT (${NOW})
+  );
+  CREATE TABLE IF NOT EXISTS messages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    role       TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content    TEXT NOT NULL,
+    reasoning  TEXT,
+    created_at TEXT NOT NULL DEFAULT (${NOW})
+  );
+  CREATE INDEX IF NOT EXISTS messages_chat_idx ON messages (chat_id, id);
+`);
+
+const getSetting = (k) => db.prepare('SELECT value FROM settings WHERE key = ?').get(k)?.value ?? null;
+function setSetting(k, v) {
+  if (v === null || v === undefined) db.prepare('DELETE FROM settings WHERE key = ?').run(k);
+  else db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(k, String(v));
 }
+
+// `npm run reset-password`: forget the password so the next visit asks for a new one.
+if (process.argv.includes('--reset-password')) {
+  setSetting('password_hash', null);
+  console.log('Password cleared. Open the app to set a new one.');
+  process.exit(0);
+}
+
+// Random secret for signing login cookies, created once and kept in the database.
+if (!getSetting('session_secret')) setSetting('session_secret', crypto.randomBytes(32).toString('hex'));
+const sessionSecret = getSetting('session_secret');
+
+// ---------- passwords ----------
+const MIN_PASSWORD = 8;
+function hashPassword(pw) {
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.scryptSync(pw, salt, 32);
+  return `scrypt$${salt.toString('hex')}$${hash.toString('hex')}`;
+}
+function verifyPassword(pw, stored) {
+  const [kind, saltHex, hashHex] = String(stored || '').split('$');
+  if (kind !== 'scrypt' || !saltHex || !hashHex) return false;
+  const hash = crypto.scryptSync(pw, Buffer.from(saltHex, 'hex'), 32);
+  return crypto.timingSafeEqual(hash, Buffer.from(hashHex, 'hex'));
+}
+const passwordIsSet = () => !!getSetting('password_hash');
 
 // ---------- auth (stateless signed cookie) ----------
 const COOKIE = 'session';
 const SESSION_DAYS = 30;
 
 function sign(value) {
-  // Password is mixed in, so changing APP_PASSWORD logs out every session.
-  return crypto.createHmac('sha256', cfg.secret).update(value + '|' + cfg.password).digest('base64url');
+  // The password hash is mixed in, so setting a new password logs out every session.
+  return crypto.createHmac('sha256', sessionSecret).update(value + '|' + (getSetting('password_hash') || '')).digest('base64url');
 }
 function makeToken() {
   const exp = String(Date.now() + SESSION_DAYS * 864e5);
@@ -77,20 +108,25 @@ function getCookie(req, name) {
   return null;
 }
 function isAuthed(req) {
+  if (!passwordIsSet()) return false;
   const tok = getCookie(req, COOKIE);
   if (!tok) return false;
   const [exp, sig] = tok.split('.');
   if (!exp || !sig || Number(exp) < Date.now()) return false;
   return safeEqual(sig, sign(exp));
 }
-function cookieHeader(value, maxAge) {
-  return `${COOKIE}=${value}; Path=${cfg.base || '/'}; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${cfg.secureCookie ? '; Secure' : ''}`;
+// Mark the cookie Secure when the page was reached over HTTPS (directly or via a proxy).
+function isHttps(req) {
+  return req.socket.encrypted || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+}
+function cookieHeader(req, value, maxAge) {
+  return `${COOKIE}=${value}; Path=${cfg.base || '/'}; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${isHttps(req) ? '; Secure' : ''}`;
 }
 
 // Login throttling: 5 failures per IP locks that IP out for 15 minutes.
 const failures = new Map();
 function clientIp(req) {
-  // Only trust X-Forwarded-For because we bind to localhost behind nginx.
+  // X-Forwarded-For is only trustworthy because we bind to localhost behind a proxy.
   return (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress;
 }
 function lockedOut(ip) {
@@ -114,6 +150,7 @@ const files = {
   '/vendor/purify.js': path.join(__dirname, 'node_modules/dompurify/dist/purify.min.js'),
 };
 const LOGIN_HTML = path.join(PUB, 'login.html');
+const SETUP_HTML = path.join(PUB, 'setup.html');
 const APP_HTML = path.join(PUB, 'index.html');
 
 const SECURITY_HEADERS = {
@@ -132,13 +169,14 @@ function sendFile(res, file, status = 200) {
 function sendHtml(res, file, error = '') {
   const html = fs.readFileSync(file, 'utf8')
     .replaceAll('{{BASE}}', cfg.base)
+    .replaceAll('{{MIN_PASSWORD}}', String(MIN_PASSWORD))
     .replace('{{ERROR}}', error ? `<p class="login-error">${error}</p>` : '');
   res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(html);
 }
-function sendLogin(res, err) {
-  sendHtml(res, LOGIN_HTML, err === 'locked' ? 'Too many attempts. Try again in 15 minutes.' : err ? 'Wrong password.' : '');
-}
+const LOGIN_ERRORS = { locked: 'Too many attempts. Try again in 15 minutes.', 1: 'Wrong password.' };
+const SETUP_ERRORS = { short: `Use at least ${MIN_PASSWORD} characters.`, mismatch: "The passwords don't match." };
+
 function json(res, status, obj) {
   res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(obj));
@@ -166,21 +204,20 @@ async function readJson(req) {
 
 // Allowed values for a chat's reasoning effort; null means "don't send it, use the model default".
 const EFFORTS = ['low', 'high', 'max'];
-
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const touchChat = (id) => db.prepare(`UPDATE chats SET updated_at = ${NOW} WHERE id = ?`).run(id);
+const currentModel = () => getSetting('model') || cfg.defaultModel;
 
 // ---------- model streaming ----------
 // Replies in progress, by chat, so the Stop button can end one cleanly on the server.
 const activeStreams = new Map();
 
 async function streamReply(res, chatId, userMessageId = null) {
-  const { rows } = await pool.query('SELECT role, content FROM messages WHERE chat_id = $1 ORDER BY id', [chatId]);
-  const chat = await pool.query('SELECT system_prompt, reasoning_effort FROM chats WHERE id = $1', [chatId]);
-  const effort = chat.rows[0]?.reasoning_effort;
-  // The chat's own prompt wins; SYSTEM_PROMPT in the env file is only a fallback.
-  const systemPrompt = chat.rows[0]?.system_prompt || cfg.systemPrompt;
+  const rows = db.prepare('SELECT role, content FROM messages WHERE chat_id = ? ORDER BY id').all(chatId);
+  const chat = db.prepare('SELECT system_prompt, reasoning_effort FROM chats WHERE id = ?').get(chatId) || {};
   const messages = [];
-  if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+  if (chat.system_prompt) messages.push({ role: 'system', content: chat.system_prompt });
   for (const r of rows) messages.push({ role: r.role, content: r.content });
 
   res.writeHead(200, {
@@ -199,16 +236,19 @@ async function streamReply(res, chatId, userMessageId = null) {
   if (userMessageId) send({ u: userMessageId });
 
   let content = '', reasoning = '', error = null;
+  const apiKey = getSetting('api_key');
   try {
+    if (!apiKey) throw new Error('No API key yet. Click the key icon at the bottom left to add one, then press Retry.');
     const up = await fetch(`${cfg.apiBase}/chat/completions`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
-      body: JSON.stringify({ model: cfg.model, messages, stream: true, ...(effort ? { reasoning_effort: effort } : {}) }),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model: currentModel(), messages, stream: true, ...(chat.reasoning_effort ? { reasoning_effort: chat.reasoning_effort } : {}) }),
       signal: ac.signal,
     });
     if (!up.ok) {
       const text = await up.text().catch(() => '');
-      throw new Error(`API returned ${up.status}: ${text.slice(0, 500)}`);
+      throw new Error(up.status === 401 ? 'The API rejected the key (401). Check it via the key icon at the bottom left.'
+        : `API returned ${up.status}: ${text.slice(0, 500)}`);
     }
     const decoder = new TextDecoder();
     let buf = '';
@@ -237,15 +277,13 @@ async function streamReply(res, chatId, userMessageId = null) {
   // Save whatever arrived, including a partial reply after Stop.
   let id = null;
   if (content || reasoning) {
-    const r = await pool.query(
-      'INSERT INTO messages (chat_id, role, content, reasoning) VALUES ($1, $2, $3, $4) RETURNING id',
-      [chatId, 'assistant', content, reasoning || null]);
-    id = r.rows[0].id;
+    id = db.prepare('INSERT INTO messages (chat_id, role, content, reasoning) VALUES (?, ?, ?, ?)')
+      .run(chatId, 'assistant', content, reasoning || null).lastInsertRowid;
   }
   if (activeStreams.get(chatId) === ac) activeStreams.delete(chatId);
-  await pool.query('UPDATE chats SET updated_at = now() WHERE id = $1', [chatId]);
+  touchChat(chatId);
   if (error) send({ error });
-  send({ done: true, id });
+  send({ done: true, id: id === null ? null : Number(id) });
   res.end();
 }
 
@@ -255,7 +293,7 @@ async function handle(req, res) {
   let p = url.pathname;
   const m = req.method;
 
-  // Strip the subpath prefix (nginx passes the full path through).
+  // Strip the subpath prefix (the proxy passes the full path through).
   if (cfg.base) {
     if (p === cfg.base) return redirect(res, '/');
     if (!p.startsWith(cfg.base + '/')) { res.writeHead(404); return res.end('Not found'); }
@@ -266,23 +304,40 @@ async function handle(req, res) {
   if (m === 'GET' && p === '/static/style.css') return sendFile(res, files[p]);
   if (m === 'GET' && p === '/static/icon.svg') return sendFile(res, files[p]);
 
+  // First run: no password yet, so every page leads to "create a password".
+  if (!passwordIsSet()) {
+    if (m === 'POST' && p === '/setup') {
+      const form = new URLSearchParams(await readBody(req, 10 * 1024));
+      const pw = form.get('password') || '';
+      if (pw.length < MIN_PASSWORD) return redirect(res, '/?e=short');
+      if (pw !== form.get('confirm')) return redirect(res, '/?e=mismatch');
+      if (passwordIsSet()) return redirect(res, '/'); // someone else finished setup first
+      setSetting('password_hash', hashPassword(pw));
+      console.log('Password created.');
+      return redirect(res, '/', { 'Set-Cookie': cookieHeader(req, makeToken(), SESSION_DAYS * 86400) });
+    }
+    if (p.startsWith('/api/')) return json(res, 401, { error: 'Not logged in' });
+    if (m === 'GET' && (p === '/' || p.startsWith('/c/'))) return sendHtml(res, SETUP_HTML, SETUP_ERRORS[url.searchParams.get('e')] || '');
+    return redirect(res, '/');
+  }
+
   if (m === 'POST' && p === '/login') {
     const ip = clientIp(req);
     if (lockedOut(ip)) return redirect(res, '/?e=locked');
     const form = new URLSearchParams(await readBody(req, 10 * 1024));
-    if (safeEqual(form.get('password') || '', cfg.password)) {
+    if (verifyPassword(form.get('password') || '', getSetting('password_hash'))) {
       failures.delete(ip);
-      return redirect(res, '/', { 'Set-Cookie': cookieHeader(makeToken(), SESSION_DAYS * 86400) });
+      return redirect(res, '/', { 'Set-Cookie': cookieHeader(req, makeToken(), SESSION_DAYS * 86400) });
     }
     noteFailure(ip);
     console.warn(`Failed login from ${ip}`);
     return redirect(res, '/?e=1');
   }
-  if (m === 'POST' && p === '/logout') return redirect(res, '/', { 'Set-Cookie': cookieHeader('', 0) });
+  if (m === 'POST' && p === '/logout') return redirect(res, '/', { 'Set-Cookie': cookieHeader(req, '', 0) });
 
   if (!isAuthed(req)) {
     if (p.startsWith('/api/')) return json(res, 401, { error: 'Not logged in' });
-    if (m === 'GET' && (p === '/' || p.startsWith('/c/'))) return sendLogin(res, url.searchParams.get('e'));
+    if (m === 'GET' && (p === '/' || p.startsWith('/c/'))) return sendHtml(res, LOGIN_HTML, LOGIN_ERRORS[url.searchParams.get('e')] || '');
     return redirect(res, '/');
   }
 
@@ -290,39 +345,56 @@ async function handle(req, res) {
   if (m === 'GET' && files[p]) return sendFile(res, files[p]);
   if (m === 'GET' && (p === '/' || /^\/c\/[0-9a-f-]+$/i.test(p))) return sendHtml(res, APP_HTML);
 
+  if (p === '/api/settings' && m === 'GET') {
+    const key = getSetting('api_key');
+    // The key itself never goes back to the browser, only its last 4 characters.
+    return json(res, 200, { has_key: !!key, key_hint: key ? key.slice(-4) : null, model: currentModel(), default_model: cfg.defaultModel });
+  }
+  if (p === '/api/settings' && m === 'PUT') {
+    const body = await readJson(req);
+    if ('api_key' in body) {
+      const key = String(body.api_key ?? '').trim();
+      if (/\s/.test(key)) return json(res, 400, { error: 'The key should not contain spaces.' });
+      setSetting('api_key', key || null);
+    }
+    if ('model' in body) {
+      const model = String(body.model ?? '').trim();
+      setSetting('model', model && model !== cfg.defaultModel ? model.slice(0, 200) : null);
+    }
+    return json(res, 200, { ok: true });
+  }
+
   if (p === '/api/chats' && m === 'GET') {
-    // Remove untouched empty chats (no messages, no prompt, never renamed), except the one being viewed.
+    // Remove untouched empty chats (no messages, no settings, never renamed), except the one being viewed.
     const keep = url.searchParams.get('keep');
-    await pool.query(
-      `DELETE FROM chats c WHERE c.title = 'New chat' AND c.system_prompt IS NULL AND c.reasoning_effort IS NULL
-         AND c.id IS DISTINCT FROM $1::uuid
-         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)`,
-      [keep && UUID_RE.test(keep) ? keep : null]);
-    const { rows } = await pool.query(
+    db.prepare(`DELETE FROM chats WHERE title = 'New chat' AND system_prompt IS NULL AND reasoning_effort IS NULL
+                  AND id IS NOT ? AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = chats.id)`)
+      .run(keep && UUID_RE.test(keep) ? keep : null);
+    const rows = db.prepare(
       `SELECT id, title, updated_at, reasoning_effort, system_prompt IS NOT NULL AS has_prompt,
               EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = chats.id) AS has_messages
-         FROM chats ORDER BY updated_at DESC LIMIT 500`);
-    return json(res, 200, rows);
+         FROM chats ORDER BY updated_at DESC LIMIT 500`).all();
+    return json(res, 200, rows.map((r) => ({ ...r, has_prompt: !!r.has_prompt, has_messages: !!r.has_messages })));
   }
   if (p === '/api/chats' && m === 'POST') {
-    const { rows } = await pool.query('INSERT INTO chats DEFAULT VALUES RETURNING id, title, updated_at');
-    return json(res, 201, rows[0]);
+    const id = crypto.randomUUID();
+    db.prepare('INSERT INTO chats (id) VALUES (?)').run(id);
+    return json(res, 201, db.prepare('SELECT id, title, updated_at FROM chats WHERE id = ?').get(id));
   }
 
   const cm = p.match(/^\/api\/chats\/([^/]+)(\/messages|\/regenerate|\/stop)?(?:\/(\d+))?$/);
   if (cm) {
     const id = cm[1];
     if (!UUID_RE.test(id)) return json(res, 404, { error: 'Not found' });
-    const exists = await pool.query('SELECT id, title, system_prompt, reasoning_effort FROM chats WHERE id = $1', [id]);
-    if (!exists.rowCount) return json(res, 404, { error: 'Not found' });
-    const chat = exists.rows[0];
+    const chat = db.prepare('SELECT id, title, system_prompt, reasoning_effort FROM chats WHERE id = ?').get(id);
+    if (!chat) return json(res, 404, { error: 'Not found' });
     const sub = cm[2];
     const msgId = cm[3];
     if (msgId && !(sub === '/messages' && m === 'DELETE')) return json(res, 404, { error: 'Not found' });
 
     if (sub === '/messages' && msgId && m === 'DELETE') {
-      await pool.query('DELETE FROM messages WHERE id = $1 AND chat_id = $2', [msgId, id]);
-      await pool.query('UPDATE chats SET updated_at = now() WHERE id = $1', [id]);
+      db.prepare('DELETE FROM messages WHERE id = ? AND chat_id = ?').run(Number(msgId), id);
+      touchChat(id);
       return json(res, 200, { ok: true });
     }
     if (sub === '/stop' && m === 'POST') {
@@ -331,49 +403,48 @@ async function handle(req, res) {
     }
 
     if (!sub && m === 'GET') {
-      const { rows } = await pool.query('SELECT id, role, content, reasoning FROM messages WHERE chat_id = $1 ORDER BY id', [id]);
+      const rows = db.prepare('SELECT id, role, content, reasoning FROM messages WHERE chat_id = ? ORDER BY id').all(id);
       return json(res, 200, { id, title: chat.title, system_prompt: chat.system_prompt, reasoning_effort: chat.reasoning_effort, messages: rows });
     }
     if (!sub && m === 'PATCH') {
       const body = await readJson(req);
+      if ('reasoning_effort' in body && body.reasoning_effort !== null && !EFFORTS.includes(body.reasoning_effort)) {
+        return json(res, 400, { error: 'Invalid reasoning effort' });
+      }
       if ('title' in body) {
         const title = String(body.title || '').trim().slice(0, 200);
         if (!title) return json(res, 400, { error: 'Title required' });
-        await pool.query('UPDATE chats SET title = $2 WHERE id = $1', [id, title]);
+        db.prepare('UPDATE chats SET title = ? WHERE id = ?').run(title, id);
       }
       if ('system_prompt' in body) {
         // Blank clears it.
         const sp = String(body.system_prompt ?? '').trim() ? String(body.system_prompt) : null;
-        await pool.query('UPDATE chats SET system_prompt = $2 WHERE id = $1', [id, sp]);
+        db.prepare('UPDATE chats SET system_prompt = ? WHERE id = ?').run(sp, id);
       }
       if ('reasoning_effort' in body) {
-        const e = body.reasoning_effort;
-        if (e !== null && !EFFORTS.includes(e)) return json(res, 400, { error: 'Invalid reasoning effort' });
-        await pool.query('UPDATE chats SET reasoning_effort = $2 WHERE id = $1', [id, e]);
+        db.prepare('UPDATE chats SET reasoning_effort = ? WHERE id = ?').run(body.reasoning_effort, id);
       }
       return json(res, 200, { ok: true });
     }
     if (!sub && m === 'DELETE') {
-      await pool.query('DELETE FROM chats WHERE id = $1', [id]);
+      db.prepare('DELETE FROM chats WHERE id = ?').run(id);
       return json(res, 200, { ok: true });
     }
     if (sub === '/messages' && m === 'POST') {
       const body = await readJson(req);
       const content = String(body.content || '');
       if (!content.trim()) return json(res, 400, { error: 'Message is empty' });
-      const ins = await pool.query('INSERT INTO messages (chat_id, role, content) VALUES ($1, $2, $3) RETURNING id', [id, 'user', content]);
+      const userId = db.prepare('INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)').run(id, 'user', content).lastInsertRowid;
       if (chat.title === 'New chat') {
-        const title = content.trim().replace(/\s+/g, ' ').slice(0, 60);
-        await pool.query('UPDATE chats SET title = $2 WHERE id = $1', [id, title]);
+        db.prepare('UPDATE chats SET title = ? WHERE id = ?').run(content.trim().replace(/\s+/g, ' ').slice(0, 60), id);
       }
-      return streamReply(res, id, ins.rows[0].id);
+      return streamReply(res, id, Number(userId));
     }
     if (sub === '/regenerate' && m === 'POST') {
       // Drop the last assistant reply (if any) and ask again.
-      await pool.query(
-        `DELETE FROM messages WHERE id = (SELECT id FROM messages WHERE chat_id = $1 ORDER BY id DESC LIMIT 1) AND role = 'assistant'`, [id]);
-      const last = await pool.query('SELECT role FROM messages WHERE chat_id = $1 ORDER BY id DESC LIMIT 1', [id]);
-      if (!last.rowCount || last.rows[0].role !== 'user') return json(res, 400, { error: 'Nothing to regenerate' });
+      db.prepare(`DELETE FROM messages WHERE id = (SELECT id FROM messages WHERE chat_id = ? ORDER BY id DESC LIMIT 1) AND role = 'assistant'`).run(id);
+      const last = db.prepare('SELECT role FROM messages WHERE chat_id = ? ORDER BY id DESC LIMIT 1').get(id);
+      if (!last || last.role !== 'user') return json(res, 400, { error: 'Nothing to regenerate' });
       return streamReply(res, id);
     }
   }
@@ -389,8 +460,23 @@ const server = http.createServer((req, res) => {
   });
 });
 
-initDb()
-  .then(() => server.listen(cfg.port, cfg.host, () => console.log(`Chat listening on http://${cfg.host}:${cfg.port}${cfg.base}/ (model: ${cfg.model})`)))
-  .catch((e) => { console.error('Database setup failed:', e.message); process.exit(1); });
+server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE') console.error(`Port ${cfg.port} is already in use. Start with a different one, e.g. PORT=3001 npm start`);
+  else console.error(e.message);
+  process.exit(1);
+});
 
-process.on('SIGTERM', () => { server.close(); pool.end().finally(() => process.exit(0)); });
+server.listen(cfg.port, cfg.host, () => {
+  const shown = cfg.host === '127.0.0.1' || cfg.host === '0.0.0.0' ? 'localhost' : cfg.host;
+  console.log(`Chat is running. Open http://${shown}:${cfg.port}${cfg.base}/ in your browser.`);
+  console.log(`Data is stored in ${cfg.dataDir}`);
+  if (!passwordIsSet()) console.log('First run: the page will ask you to create a password.');
+});
+
+function shutdown() {
+  server.close();
+  try { db.close(); } catch { /* already closed */ }
+  process.exit(0);
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
